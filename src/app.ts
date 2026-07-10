@@ -31,6 +31,10 @@ export function createApp(db: DatabaseClient): express.Express {
     });
   }));
 
+  app.get("/favicon.ico", (_req: Request, res: Response) => {
+    res.status(204).end();
+  });
+
   app.use((_req, _res, next) => {
     next(new HttpError(404, "Not found"));
   });
@@ -40,13 +44,15 @@ export function createApp(db: DatabaseClient): express.Express {
   return app;
 }
 
-const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+const errorHandler: ErrorRequestHandler = (error, req, res, _next) => {
   const httpError = error instanceof HttpError ? error : null;
   const statusCode = httpError?.statusCode ?? 500;
   const message = httpError?.expose ? httpError.message : "Internal server error";
 
   if (statusCode >= 500) {
     logger.error({ error: toSafeError(error), statusCode }, "request failed");
+  } else if (statusCode === 404) {
+    logger.info({ method: req.method, path: req.path, statusCode }, "request not found");
   } else {
     logger.warn({ error: toSafeError(error), statusCode }, "request rejected");
   }
