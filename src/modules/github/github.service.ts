@@ -1,5 +1,6 @@
-import type Database from "better-sqlite3";
+import type { Transaction } from "@libsql/client";
 import { env } from "../../config/env.js";
+import type { DatabaseClient } from "../../database/connection.js";
 import { HttpError } from "../../common/http-error.js";
 import { logger } from "../../common/logger.js";
 import { verifyGitHubSignature } from "./github.signature.js";
@@ -9,11 +10,11 @@ import type { QueueService } from "../queue/queue.service.js";
 
 export class GitHubService {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseClient,
     private readonly queue: QueueService
   ) {}
 
-  public handleWebhook(rawBody: Buffer, headers: GitHubWebhookHeaders): GitHubWebhookResult {
+  public async handleWebhook(rawBody: Buffer, headers: GitHubWebhookHeaders): Promise<GitHubWebhookResult> {
     if (!verifyGitHubSignature(rawBody, headers.signature256, env.GITHUB_WEBHOOK_SECRET)) {
       throw new HttpError(401, "Invalid GitHub webhook signature");
     }
@@ -37,14 +38,16 @@ export class GitHubService {
     return this.enqueueNotification(headers, notification.repository.fullName, notification);
   }
 
-  private enqueueNotification(
+  private async enqueueNotification(
     headers: GitHubWebhookHeaders,
     repositoryFullName: string,
     notification: ReturnType<typeof normalizePush> | ReturnType<typeof normalizeWorkflowRun>
-  ): GitHubWebhookResult {
-    const result = this.db.transaction(() => {
-      const inserted = this.insertDelivery(headers, repositoryFullName);
+  ): Promise<GitHubWebhookResult> {
+    const transaction = await this.db.transaction("write");
+    try {
+      const inserted = await this.insertDelivery(transaction, headers, repositoryFullName);
       if (!inserted) {
+        await transaction.commit();
         return {
           accepted: true,
           duplicate: true,
@@ -55,9 +58,11 @@ export class GitHubService {
         };
       }
 
-      const jobId = this.queue.enqueue(notification);
-      this.markDeliveryProcessed(headers.deliveryId);
-      return {
+      const jobId = await this.queue.enqueue(notification, transaction);
+      await this.markDeliveryProcessed(transaction, headers.deliveryId);
+      await transaction.commit();
+
+      const result = {
         accepted: true,
         duplicate: false,
         eventName: headers.eventName,
@@ -65,20 +70,23 @@ export class GitHubService {
         jobId,
         message: "Webhook accepted"
       };
-    })();
 
-    logger.info(
-      {
-        githubDeliveryId: headers.deliveryId,
-        githubEventName: headers.eventName,
-        repositoryFullName,
-        queueJobId: result.jobId,
-        duplicate: result.duplicate
-      },
-      "github webhook handled"
-    );
+      logger.info(
+        {
+          githubDeliveryId: headers.deliveryId,
+          githubEventName: headers.eventName,
+          repositoryFullName,
+          queueJobId: result.jobId,
+          duplicate: result.duplicate
+        },
+        "github webhook handled"
+      );
 
-    return result;
+      return result;
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   }
 
   private parseJson(rawBody: Buffer): unknown {
@@ -89,16 +97,22 @@ export class GitHubService {
     }
   }
 
-  private recordAcceptedDelivery(
+  private async recordAcceptedDelivery(
     headers: GitHubWebhookHeaders,
     repositoryFullName: string | null,
     message: string | null,
     responseMessage: string
-  ): GitHubWebhookResult {
-    const result = this.db.transaction(() => {
-      const inserted = this.insertDelivery(headers, repositoryFullName);
+  ): Promise<GitHubWebhookResult> {
+    const transaction = await this.db.transaction("write");
+    try {
+      const inserted = await this.insertDelivery(transaction, headers, repositoryFullName);
       if (inserted) {
-        this.markDeliveryProcessed(headers.deliveryId);
+        await this.markDeliveryProcessed(transaction, headers.deliveryId);
+      }
+      await transaction.commit();
+
+      if (message) {
+        logger.info({ githubDeliveryId: headers.deliveryId, message }, "github webhook delivery recorded");
       }
 
       return {
@@ -109,32 +123,33 @@ export class GitHubService {
         jobId: null,
         message: inserted ? responseMessage : "Duplicate delivery ignored"
       };
-    })();
-
-    if (message) {
-      logger.info({ githubDeliveryId: headers.deliveryId, message }, "github webhook delivery recorded");
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     }
-
-    return result;
   }
 
-  private insertDelivery(headers: GitHubWebhookHeaders, repositoryFullName: string | null): boolean {
-    const result = this.db
-      .prepare(
-        `
+  private async insertDelivery(
+    executor: Transaction,
+    headers: GitHubWebhookHeaders,
+    repositoryFullName: string | null
+  ): Promise<boolean> {
+    const result = await executor.execute({
+      sql: `
         INSERT OR IGNORE INTO webhook_deliveries (github_delivery_id, event_name, repository_full_name, created_at)
         VALUES (?, ?, ?, ?)
-      `
-      )
-      .run(headers.deliveryId, headers.eventName, repositoryFullName, new Date().toISOString());
+      `,
+      args: [headers.deliveryId, headers.eventName, repositoryFullName, new Date().toISOString()]
+    });
 
-    return result.changes === 1;
+    return result.rowsAffected === 1;
   }
 
-  private markDeliveryProcessed(deliveryId: string): void {
-    this.db
-      .prepare("UPDATE webhook_deliveries SET processed_at = ? WHERE github_delivery_id = ?")
-      .run(new Date().toISOString(), deliveryId);
+  private async markDeliveryProcessed(executor: Transaction, deliveryId: string): Promise<void> {
+    await executor.execute({
+      sql: "UPDATE webhook_deliveries SET processed_at = ? WHERE github_delivery_id = ?",
+      args: [new Date().toISOString(), deliveryId]
+    });
   }
 
   private getRepositoryFullName(payload: unknown): string | null {

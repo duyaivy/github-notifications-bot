@@ -23,12 +23,12 @@ export class QueueWorker {
     logger.info({ workerId: this.queue.workerId }, "queue worker started");
 
     while (!this.stopping) {
-      const recovered = this.queue.recoverStaleJobs();
+      const recovered = await this.queue.recoverStaleJobs();
       if (recovered > 0) {
         logger.warn({ recovered }, "recovered stale processing jobs");
       }
 
-      const jobs = this.queue.claimAvailable();
+      const jobs = await this.queue.claimAvailable();
       if (jobs.length === 0) {
         await sleep(env.WORKER_POLL_INTERVAL_MS);
         continue;
@@ -49,7 +49,7 @@ export class QueueWorker {
     const start = performance.now();
     try {
       await this.notifications.process(job);
-      this.queue.complete(job);
+      await this.queue.complete(job);
       logger.info(
         {
           queueJobId: job.id,
@@ -65,7 +65,7 @@ export class QueueWorker {
       const errorMessage = safeErrorMessage(error);
 
       if (retryable && this.queue.hasAttemptsRemaining(job)) {
-        this.queue.retry(job, errorMessage, retryAfterMs(error));
+        await this.queue.retry(job, errorMessage, retryAfterMs(error));
         logger.warn(
           {
             queueJobId: job.id,
@@ -79,7 +79,7 @@ export class QueueWorker {
         return;
       }
 
-      this.queue.fail(job, errorMessage);
+      await this.queue.fail(job, errorMessage);
       logger.error(
         {
           queueJobId: job.id,

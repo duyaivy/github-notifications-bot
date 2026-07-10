@@ -3,6 +3,7 @@ services:
     build: .
     environment:
       NODE_ENV: production
+      HOST: 0.0.0.0
       PORT: 3000
       SQLITE_PATH: /data/app.db
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}

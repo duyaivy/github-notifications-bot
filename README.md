@@ -1,16 +1,16 @@
 # GitHub to Discord Notify Bot
 
-Local-first backend for receiving GitHub App webhooks, persisting notification jobs in SQLite, and sending formatted GitHub push messages to Discord through the Discord Bot REST API.
+Backend for receiving GitHub App webhooks, persisting notification jobs in SQLite/libSQL, and sending formatted GitHub messages to Discord through the Discord Bot REST API.
 
 ## Architecture
 
-The app runs the HTTP server and queue worker in one Node.js process. The HTTP server verifies GitHub webhook signatures, deduplicates delivery IDs, normalizes supported events, and persists jobs quickly. The in-process worker polls SQLite, claims pending jobs in a transaction, creates or reuses a Discord thread for each GitHub repository inside the configured notification channel, sends messages to that thread, and records completion or retry state.
+The app runs the HTTP server and queue worker in one Node.js process. The HTTP server verifies GitHub webhook signatures, deduplicates delivery IDs, normalizes supported events, and persists jobs quickly. The in-process worker polls SQLite/libSQL, claims pending jobs in a transaction, creates or reuses a Discord thread for each GitHub repository inside the configured notification channel, sends messages to that thread, and records completion or retry state.
 
 Folder layout:
 
 ```text
 src/config       environment validation
-src/database     SQLite connection and migrations
+src/database     SQLite/libSQL connection and migrations
 src/common       logging, errors, request logging, shutdown helpers
 src/modules/github
 src/modules/queue
@@ -33,8 +33,11 @@ Copy `.env.example` to `.env` and set real local values:
 
 ```dotenv
 NODE_ENV=development
+HOST=0.0.0.0
 PORT=3000
 SQLITE_PATH=./data/app.db
+TURSO_DATABASE_URL=
+TURSO_AUTH_TOKEN=
 GITHUB_WEBHOOK_SECRET=replace_me
 DISCORD_BOT_TOKEN=replace_me
 DISCORD_CHANNEL_ID=replace_me
@@ -45,7 +48,7 @@ WORKER_STALE_JOB_TIMEOUT_MS=300000
 LOG_LEVEL=info
 ```
 
-Secrets are read only from environment variables and are not logged.
+For local development, leave `TURSO_DATABASE_URL` empty and the app uses `SQLITE_PATH`. For Render Free, set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` so data is stored in Turso instead of Render's ephemeral filesystem. Secrets are read only from environment variables and are not logged.
 
 ## Local Run
 
@@ -68,7 +71,7 @@ Set `GITHUB_WEBHOOK_SECRET`, `DISCORD_BOT_TOKEN`, and `DISCORD_CHANNEL_ID` in yo
 docker compose up --build
 ```
 
-The container runs migrations on startup, then starts both the HTTP server and queue worker in the same process. The SQLite database is stored in the named Docker volume at `/data/app.db`.
+The container runs migrations on startup, then starts both the HTTP server and queue worker in the same process. Local Docker Compose stores SQLite in the named Docker volume at `/data/app.db`. Render Free should use Turso via `TURSO_DATABASE_URL` instead of a local database file.
 
 ## Discord Setup
 
@@ -85,7 +88,7 @@ The service creates one public thread per GitHub repository inside `DISCORD_CHAN
 
 ## Repository Threads
 
-Repository threads are stored in SQLite and matched by `owner + repo`. The first notification for a repository creates a public thread in `DISCORD_CHANNEL_ID`, stores its `discord_thread_id`, and sends the notification there. Later notifications for the same repository reuse the stored thread.
+Repository threads are stored in SQLite/libSQL and matched by `owner + repo`. The first notification for a repository creates a public thread in `DISCORD_CHANNEL_ID`, stores its `discord_thread_id`, and sends the notification there. Later notifications for the same repository reuse the stored thread.
 
 Thread names use the GitHub repository full name, for example `example-owner/example-repo`. Branch names are included in the notification message body, not used to choose a destination.
 
@@ -134,9 +137,9 @@ Use the resulting signature with `X-GitHub-Event: push` and a unique `X-GitHub-D
 
 ## Processing Behavior
 
-`webhook_deliveries.processed_at` means the webhook was accepted and the corresponding local action was persisted. For supported `push` events, delivery insertion and notification job insertion happen atomically in one SQLite transaction. Duplicate GitHub delivery IDs return success without creating another job.
+`webhook_deliveries.processed_at` means the webhook was accepted and the corresponding local action was persisted. For supported `push` events, delivery insertion and notification job insertion happen atomically in one SQLite/libSQL transaction. Duplicate GitHub delivery IDs return success without creating another job.
 
-Jobs are persisted in `notification_jobs`, so they survive process and container restarts as long as the SQLite file or Docker volume remains. The worker claims jobs by selecting pending rows and marking them `processing` inside a SQLite transaction, which prevents normal multi-worker double-claiming.
+Jobs are persisted in `notification_jobs`, so they survive process and container restarts as long as the SQLite file, Docker volume, or Turso database remains. The worker claims jobs by selecting pending rows and marking them `processing` inside a transaction, which prevents normal multi-worker double-claiming.
 
 Retryable failures include network errors, Discord rate limits, and Discord 5xx responses. Discord 403 and 404 responses are treated as permanent destination failures. Retries use bounded exponential backoff with jitter and respect Discord retry delay data when available. Exhausted jobs are marked `failed`.
 
@@ -145,6 +148,5 @@ If a worker exits after claiming a job, stale `processing` jobs older than `WORK
 ## Extending Events
 
 The controller only extracts HTTP input and returns responses. Add future GitHub event support in the GitHub service by adding an event-specific payload parser and normalizer under `src/modules/github`, then enqueue a normalized notification type consumed by the notification module.
-
 
 Only `push` is implemented now.

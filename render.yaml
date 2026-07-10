@@ -1,0 +1,32 @@
+services:
+  - type: web
+    runtime: docker
+    name: github-discord-notify-bot
+    plan: free
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: WORKER_POLL_INTERVAL_MS
+        value: 2000
+      - key: WORKER_BATCH_SIZE
+        value: 10
+      - key: WORKER_MAX_ATTEMPTS
+        value: 5
+      - key: WORKER_STALE_JOB_TIMEOUT_MS
+        value: 300000
+      - key: LOG_LEVEL
+        value: info
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_CHANNEL_ID
+        sync: false

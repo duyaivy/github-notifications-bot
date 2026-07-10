@@ -1,15 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDatabaseConnection } from "./connection.js";
+import { configureDatabase, createDatabaseConnection } from "./connection.js";
 import { logger } from "../common/logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const currentFile = fileURLToPath(import.meta.url);
 
-export function runMigrations(): void {
+export async function runMigrations(): Promise<void> {
   const db = createDatabaseConnection();
-  db.exec(`
+  await configureDatabase(db);
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -22,24 +23,33 @@ export function runMigrations(): void {
     .filter((file) => file.endsWith(".sql"))
     .sort();
 
-  const migration = db.transaction((file: string) => {
-    const alreadyApplied = db
-      .prepare("SELECT id FROM schema_migrations WHERE id = ?")
-      .get(file);
-    if (alreadyApplied) {
-      return false;
-    }
-
-    const sql = fs.readFileSync(path.join(migrationsDir, file), "utf8");
-    db.exec(sql);
-    db.prepare("INSERT INTO schema_migrations (id) VALUES (?)").run(file);
-    return true;
-  });
-
   for (const file of migrationFiles) {
-    const applied = migration(file);
-    if (applied) {
+    const transaction = await db.transaction("write");
+    try {
+      const alreadyApplied = await transaction.execute({
+        sql: "SELECT id FROM schema_migrations WHERE id = ?",
+        args: [file]
+      });
+
+      if (alreadyApplied.rows.length > 0) {
+        await transaction.commit();
+        continue;
+      }
+
+      const sql = fs.readFileSync(path.join(migrationsDir, file), "utf8");
+      for (const statement of splitSqlStatements(sql)) {
+        await transaction.execute(statement);
+      }
+
+      await transaction.execute({
+        sql: "INSERT INTO schema_migrations (id) VALUES (?)",
+        args: [file]
+      });
+      await transaction.commit();
       logger.info({ migration: file }, "applied database migration");
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     }
   }
 
@@ -47,5 +57,12 @@ export function runMigrations(): void {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
-  runMigrations();
+  await runMigrations();
+}
+
+function splitSqlStatements(sql: string): string[] {
+  return sql
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
 }

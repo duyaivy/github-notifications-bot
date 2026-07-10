@@ -10,7 +10,7 @@ export class RepoThreadService {
   ) {}
 
   public async findOrCreateThread(owner: string, repo: string): Promise<RepoThread> {
-    const existing = this.threads.findByRepository(owner, repo);
+    const existing = await this.threads.findByRepository(owner, repo);
     if (existing) {
       return existing;
     }

@@ -1,7 +1,7 @@
 import express, { type ErrorRequestHandler, type Request, type Response } from "express";
-import type Database from "better-sqlite3";
-import { checkDatabaseReady } from "./database/connection.js";
+import { checkDatabaseReady, type DatabaseClient } from "./database/connection.js";
 import { HttpError } from "./common/http-error.js";
+import { asyncHandler } from "./common/async-handler.js";
 import { requestLogger } from "./common/request-logger.js";
 import { logger } from "./common/logger.js";
 import { toSafeError } from "./common/errors.js";
@@ -12,7 +12,7 @@ import { GitHubController } from "./modules/github/github.controller.js";
 import { createGitHubRoutes } from "./modules/github/github.routes.js";
 import { env } from "./config/env.js";
 
-export function createApp(db: Database.Database): express.Express {
+export function createApp(db: DatabaseClient): express.Express {
   const app = express();
 
   const queue = new QueueService(new QueueRepository(db));
@@ -24,12 +24,12 @@ export function createApp(db: Database.Database): express.Express {
   app.use(createGitHubRoutes(githubController));
   app.use(express.json({ limit: "1mb" }));
 
-  app.get("/health", (_req: Request, res: Response) => {
+  app.get("/health", asyncHandler(async (_req: Request, res: Response) => {
     res.json({
       status: "ok",
-      sqlite: checkDatabaseReady(db) ? "ready" : "unready"
+      database: (await checkDatabaseReady(db)) ? "ready" : "unready"
     });
-  });
+  }));
 
   app.use((_req, _res, next) => {
     next(new HttpError(404, "Not found"));

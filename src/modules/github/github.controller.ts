@@ -12,7 +12,7 @@ export class GitHubController {
     }
 
     const headers = this.extractHeaders(req);
-    const result = this.github.handleWebhook(req.body, headers);
+    const result = await this.github.handleWebhook(req.body, headers);
     res.status(202).json(result);
   };
 

@@ -4,8 +4,8 @@ dist
 .git
 .env
 npm-debug.log
-package-lock.json
 data/
 *.db
 *.db-shm
 *.db-wal
+RENDER_DEPLOYMENT.md

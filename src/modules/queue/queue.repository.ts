@@ -1,6 +1,11 @@
-import type Database from "better-sqlite3";
+import type { InStatement, ResultSet } from "@libsql/client";
+import type { DatabaseClient } from "../../database/connection.js";
 import type { EnqueueNotificationJobInput, QueueJob, QueueJobStatus } from "./queue.types.js";
 import type { NotificationPayload } from "../notification/notification.types.js";
+
+export interface DatabaseExecutor {
+  execute(stmt: InStatement): Promise<ResultSet>;
+}
 
 interface QueueJobRow {
   id: number;
@@ -41,85 +46,86 @@ function mapJob(row: QueueJobRow): QueueJob {
 }
 
 export class QueueRepository {
-  public constructor(private readonly db: Database.Database) {}
+  public constructor(private readonly db: DatabaseClient) {}
 
-  public enqueue(input: EnqueueNotificationJobInput): number {
-    const result = this.db
-      .prepare(
-        `
+  public async enqueue(input: EnqueueNotificationJobInput, executor: DatabaseExecutor = this.db): Promise<number> {
+    const now = nowIso();
+    const result = await executor.execute({
+      sql: `
         INSERT INTO notification_jobs (type, payload_json, status, attempts, max_attempts, available_at, created_at, updated_at)
         VALUES (?, ?, 'pending', 0, ?, ?, ?, ?)
-      `
-      )
-      .run(input.type, JSON.stringify(input.payload), input.maxAttempts, input.availableAt, nowIso(), nowIso());
+      `,
+      args: [input.type, JSON.stringify(input.payload), input.maxAttempts, input.availableAt, now, now]
+    });
 
     return Number(result.lastInsertRowid);
   }
 
-  public claimAvailable(limit: number, workerId: string, now = nowIso()): QueueJob[] {
-    return this.db.transaction(() => {
-      const rows = this.db
-        .prepare(
-          `
+  public async claimAvailable(limit: number, workerId: string, now = nowIso()): Promise<QueueJob[]> {
+    const transaction = await this.db.transaction("write");
+    try {
+      const rows = await transaction.execute({
+        sql: `
           SELECT id
           FROM notification_jobs
           WHERE status = 'pending' AND available_at <= ?
           ORDER BY available_at ASC, created_at ASC
           LIMIT ?
-        `
-        )
-        .all(now, limit) as Array<{ id: number }>;
+        `,
+        args: [now, limit]
+      });
 
-      if (rows.length === 0) {
+      if (rows.rows.length === 0) {
+        await transaction.commit();
         return [];
       }
 
-      const ids = rows.map((row) => row.id);
+      const ids = rows.rows.map((row) => Number(row.id));
       const placeholders = ids.map(() => "?").join(",");
-      this.db
-        .prepare(
-          `
+      await transaction.execute({
+        sql: `
           UPDATE notification_jobs
           SET status = 'processing', locked_at = ?, locked_by = ?, updated_at = ?
           WHERE status = 'pending' AND id IN (${placeholders})
-        `
-        )
-        .run(now, workerId, now, ...ids);
+        `,
+        args: [now, workerId, now, ...ids]
+      });
 
-      const claimedRows = this.db
-        .prepare(
-          `
+      const claimedRows = await transaction.execute({
+        sql: `
           SELECT id, type, payload_json, status, attempts, max_attempts, last_error, available_at,
                  locked_at, locked_by, created_at, updated_at, completed_at
           FROM notification_jobs
           WHERE locked_by = ? AND locked_at = ? AND status = 'processing'
           ORDER BY available_at ASC, created_at ASC
-        `
-        )
-        .all(workerId, now) as QueueJobRow[];
+        `,
+        args: [workerId, now]
+      });
 
-      return claimedRows.map(mapJob);
-    })();
+      await transaction.commit();
+      return claimedRows.rows.map((row) => mapJob(toQueueJobRow(row)));
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   }
 
-  public markCompleted(jobId: number): void {
+  public async markCompleted(jobId: number): Promise<void> {
     const now = nowIso();
-    this.db
-      .prepare(
-        `
+    await this.db.execute({
+      sql: `
         UPDATE notification_jobs
         SET status = 'completed', completed_at = ?, locked_at = NULL, locked_by = NULL, updated_at = ?
         WHERE id = ?
-      `
-      )
-      .run(now, now, jobId);
+      `,
+      args: [now, now, jobId]
+    });
   }
 
-  public markRetry(job: QueueJob, errorMessage: string, availableAt: string): void {
+  public async markRetry(job: QueueJob, errorMessage: string, availableAt: string): Promise<void> {
     const now = nowIso();
-    this.db
-      .prepare(
-        `
+    await this.db.execute({
+      sql: `
         UPDATE notification_jobs
         SET status = 'pending',
             attempts = attempts + 1,
@@ -129,16 +135,15 @@ export class QueueRepository {
             locked_by = NULL,
             updated_at = ?
         WHERE id = ? AND status = 'processing'
-      `
-      )
-      .run(errorMessage, availableAt, now, job.id);
+      `,
+      args: [errorMessage, availableAt, now, job.id]
+    });
   }
 
-  public markFailed(job: QueueJob, errorMessage: string): void {
+  public async markFailed(job: QueueJob, errorMessage: string): Promise<void> {
     const now = nowIso();
-    this.db
-      .prepare(
-        `
+    await this.db.execute({
+      sql: `
         UPDATE notification_jobs
         SET status = 'failed',
             attempts = attempts + 1,
@@ -147,16 +152,15 @@ export class QueueRepository {
             locked_by = NULL,
             updated_at = ?
         WHERE id = ? AND status = 'processing'
-      `
-      )
-      .run(errorMessage, now, job.id);
+      `,
+      args: [errorMessage, now, job.id]
+    });
   }
 
-  public recoverStaleProcessing(staleBefore: string, availableAt: string): number {
+  public async recoverStaleProcessing(staleBefore: string, availableAt: string): Promise<number> {
     const now = nowIso();
-    const result = this.db
-      .prepare(
-        `
+    const result = await this.db.execute({
+      sql: `
         UPDATE notification_jobs
         SET status = CASE WHEN attempts < max_attempts THEN 'pending' ELSE 'failed' END,
             available_at = CASE WHEN attempts < max_attempts THEN ? ELSE available_at END,
@@ -165,10 +169,28 @@ export class QueueRepository {
             locked_by = NULL,
             updated_at = ?
         WHERE status = 'processing' AND locked_at IS NOT NULL AND locked_at <= ?
-      `
-      )
-      .run(availableAt, now, staleBefore);
+      `,
+      args: [availableAt, now, staleBefore]
+    });
 
-    return result.changes;
+    return result.rowsAffected;
   }
+}
+
+function toQueueJobRow(row: ResultSet["rows"][number]): QueueJobRow {
+  return {
+    id: Number(row.id),
+    type: String(row.type) as NotificationPayload["type"],
+    payload_json: String(row.payload_json),
+    status: String(row.status) as QueueJobStatus,
+    attempts: Number(row.attempts),
+    max_attempts: Number(row.max_attempts),
+    last_error: row.last_error === null ? null : String(row.last_error),
+    available_at: String(row.available_at),
+    locked_at: row.locked_at === null ? null : String(row.locked_at),
+    locked_by: row.locked_by === null ? null : String(row.locked_by),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+    completed_at: row.completed_at === null ? null : String(row.completed_at)
+  };
 }

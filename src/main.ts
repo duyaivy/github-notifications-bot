@@ -2,7 +2,7 @@ import { env } from "./config/env.js";
 import { createApp } from "./app.js";
 import { logger } from "./common/logger.js";
 import { toSafeError } from "./common/errors.js";
-import { createDatabaseConnection } from "./database/connection.js";
+import { configureDatabase, createDatabaseConnection } from "./database/connection.js";
 import { runMigrations } from "./database/migrate.js";
 import { DiscordService } from "./modules/discord/discord.service.js";
 import { NotificationService } from "./modules/notification/notification.service.js";
@@ -12,9 +12,10 @@ import { QueueWorker } from "./modules/queue/queue.worker.js";
 import { RepoThreadRepository } from "./modules/repo-thread/repo-thread.repository.js";
 import { RepoThreadService } from "./modules/repo-thread/repo-thread.service.js";
 
-runMigrations();
+await runMigrations();
 
 const db = createDatabaseConnection();
+await configureDatabase(db);
 const app = createApp(db);
 
 const queue = new QueueService(new QueueRepository(db));
@@ -26,8 +27,8 @@ const worker = new QueueWorker(queue, notifications);
 let shuttingDown = false;
 let closeServerPromise: Promise<void> | null = null;
 
-const server = app.listen(env.PORT, () => {
-  logger.info({ port: env.PORT }, "http server listening");
+const server = app.listen(env.PORT, env.HOST, () => {
+  logger.info({ host: env.HOST, port: env.PORT }, "http server listening");
 });
 
 const workerRun = worker.run().catch((error) => {
