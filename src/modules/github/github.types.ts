@@ -64,6 +64,41 @@ export interface GitHubWorkflowRunPayload {
   };
 }
 
+export interface GitHubWorkflowJobPayload {
+  action: string;
+  repository: {
+    full_name: string;
+    name: string;
+    owner: {
+      login: string;
+    };
+  };
+  workflow_job: {
+    id: number;
+    run_id: number;
+    run_url?: string;
+    run_attempt?: number;
+    workflow_name: string | null;
+    head_branch: string | null;
+    head_sha: string;
+    name: string;
+    status: string;
+    conclusion: string | null;
+    started_at: string | null;
+    completed_at: string | null;
+    html_url: string;
+    steps?: Array<{
+      name: string;
+      status: string;
+      conclusion: string | null;
+      number: number;
+    }>;
+  };
+  sender: {
+    login: string;
+  };
+}
+
 export interface GitHubWebhookResult {
   accepted: boolean;
   duplicate: boolean;

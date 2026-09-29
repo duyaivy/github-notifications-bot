@@ -4,8 +4,16 @@ import type { DatabaseClient } from "../../database/connection.js";
 import { HttpError } from "../../common/http-error.js";
 import { logger } from "../../common/logger.js";
 import { verifyGitHubSignature } from "./github.signature.js";
-import { normalizePush, normalizeWorkflowRun, parseGitHubPushPayload, parseGitHubWorkflowRunPayload } from "./github.normalizer.js";
+import {
+  normalizePush,
+  normalizeWorkflowJob,
+  normalizeWorkflowRun,
+  parseGitHubPushPayload,
+  parseGitHubWorkflowJobPayload,
+  parseGitHubWorkflowRunPayload
+} from "./github.normalizer.js";
 import type { GitHubWebhookHeaders, GitHubWebhookResult } from "./github.types.js";
+import type { NotificationPayload } from "../notification/notification.types.js";
 import type { QueueService } from "../queue/queue.service.js";
 
 export class GitHubService {
@@ -28,6 +36,12 @@ export class GitHubService {
       return this.enqueueNotification(headers, notification.repository.fullName, notification);
     }
 
+    if (headers.eventName === "workflow_job") {
+      const workflowJobPayload = parseGitHubWorkflowJobPayload(parsedPayload);
+      const notification = normalizeWorkflowJob(workflowJobPayload, headers.deliveryId);
+      return this.enqueueNotification(headers, notification.repository.fullName, notification);
+    }
+
     if (headers.eventName !== "push") {
       return this.recordAcceptedDelivery(headers, repositoryFullName, null, "Event accepted but not supported yet");
     }
@@ -41,7 +55,7 @@ export class GitHubService {
   private async enqueueNotification(
     headers: GitHubWebhookHeaders,
     repositoryFullName: string,
-    notification: ReturnType<typeof normalizePush> | ReturnType<typeof normalizeWorkflowRun>
+    notification: NotificationPayload
   ): Promise<GitHubWebhookResult> {
     const transaction = await this.db.transaction("write");
     try {

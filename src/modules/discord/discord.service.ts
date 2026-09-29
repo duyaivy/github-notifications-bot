@@ -3,6 +3,8 @@ import { DiscordApiError } from "./discord.errors.js";
 import type {
   DiscordCreateThreadBody,
   DiscordCreateThreadInput,
+  DiscordEditMessageInput,
+  DiscordMessage,
   DiscordSendMessageBody,
   DiscordSendMessageInput,
   DiscordThread
@@ -33,7 +35,7 @@ export class DiscordService {
     return parsed;
   }
 
-  public async sendMessage(input: DiscordSendMessageInput): Promise<void> {
+  public async sendMessage(input: DiscordSendMessageInput): Promise<DiscordMessage> {
     if (!input.content && (!input.embeds || input.embeds.length === 0)) {
       throw new DiscordApiError("Discord message requires content or embeds", { retryable: false });
     }
@@ -50,11 +52,57 @@ export class DiscordService {
       }
     };
 
-    await this.request(`${discordApiBaseUrl}/channels/${encodeURIComponent(input.channelId)}/messages`, {
+    const response = await this.request(`${discordApiBaseUrl}/channels/${encodeURIComponent(input.channelId)}/messages`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body)
     });
+
+    const parsed = (await response.json()) as { id: string; channel_id: string };
+    return {
+      id: String(parsed.id),
+      channelId: String(parsed.channel_id)
+    };
+  }
+
+  public async editMessage(input: DiscordEditMessageInput): Promise<DiscordMessage | null> {
+    if (!input.content && (!input.embeds || input.embeds.length === 0)) {
+      throw new DiscordApiError("Discord message requires content or embeds", { retryable: false });
+    }
+
+    if (input.content && input.content.length > discordContentLimit) {
+      throw new DiscordApiError("Discord message exceeds 2000 characters", { retryable: false });
+    }
+
+    const body = {
+      ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(input.embeds !== undefined ? { embeds: input.embeds } : {}),
+      allowed_mentions: {
+        parse: []
+      }
+    };
+
+    try {
+      const response = await this.request(
+        `${discordApiBaseUrl}/channels/${encodeURIComponent(input.channelId)}/messages/${encodeURIComponent(input.messageId)}`,
+        {
+          method: "PATCH",
+          headers: this.headers(),
+          body: JSON.stringify(body)
+        }
+      );
+
+      const parsed = (await response.json()) as { id: string; channel_id: string };
+      return {
+        id: String(parsed.id),
+        channelId: String(parsed.channel_id)
+      };
+    } catch (error) {
+      if (error instanceof DiscordApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   private headers(): Record<string, string> {

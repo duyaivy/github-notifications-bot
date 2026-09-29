@@ -20,6 +20,7 @@ const envSchema = z.object({
   WORKER_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),
   WORKER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   WORKER_STALE_JOB_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+  GITHUB_TOKEN: optionalNonEmptyString,
   LOG_LEVEL: z.string().min(1).default("info")
 });
 

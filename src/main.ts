@@ -11,6 +11,8 @@ import { QueueService } from "./modules/queue/queue.service.js";
 import { QueueWorker } from "./modules/queue/queue.worker.js";
 import { RepoThreadRepository } from "./modules/repo-thread/repo-thread.repository.js";
 import { RepoThreadService } from "./modules/repo-thread/repo-thread.service.js";
+import { WorkflowRepository } from "./modules/workflow/workflow.repository.js";
+import { WorkflowService } from "./modules/workflow/workflow.service.js";
 
 await runMigrations();
 
@@ -21,7 +23,9 @@ const app = createApp(db);
 const queue = new QueueService(new QueueRepository(db));
 const discord = new DiscordService();
 const threads = new RepoThreadService(new RepoThreadRepository(db), discord);
-const notifications = new NotificationService(threads, discord);
+const workflowRepository = new WorkflowRepository(db);
+const workflows = new WorkflowService(workflowRepository, discord);
+const notifications = new NotificationService(threads, discord, workflows);
 const worker = new QueueWorker(queue, notifications);
 
 let shuttingDown = false;

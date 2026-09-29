@@ -1,4 +1,9 @@
-import type { NotificationPayload, PushNotification, WorkflowRunNotification } from "./notification.types.js";
+import type {
+  NotificationPayload,
+  PushNotification,
+  WorkflowJobNotification,
+  WorkflowRunNotification
+} from "./notification.types.js";
 
 const discordEmbedDescriptionLimit = 4096;
 const discordEmbedTitleLimit = 256;
@@ -26,8 +31,45 @@ export function formatNotification(notification: NotificationPayload): Formatted
   if (notification.type === "github.push") {
     return formatPushNotification(notification);
   }
+  if (notification.type === "github.workflow_job") {
+    return formatWorkflowJobNotification(notification);
+  }
 
   return formatWorkflowRunNotification(notification);
+}
+
+export function formatWorkflowJobNotification(notification: WorkflowJobNotification): FormattedNotificationMessage {
+  const branch = notification.job.branch ?? "unknown";
+  const sha = notification.job.headSha.slice(0, 7);
+  const statusLabel = notification.job.conclusion ?? notification.job.status;
+  const description = [
+    `Workflow: ${sanitizeLine(notification.job.workflowName)}`,
+    `Job: ${sanitizeLine(notification.job.name)}`,
+    `Branch: ${sanitizeLine(branch)}`,
+    `Commit: ${sanitizeLine(sha)}`,
+    `Status: ${sanitizeLine(statusLabel)}`,
+    `Actor: ${sanitizeLine(notification.sender)}`
+  ].join("\n");
+
+  const isSuccess = notification.job.conclusion === "success";
+  const isFailure = notification.job.conclusion === "failure";
+  const color = isSuccess ? successColor : isFailure ? failureColor : warningColor;
+
+  return {
+    embeds: [
+      {
+        title: trimToDiscordTitle(
+          `[${notification.repository.name}:${branch}] ${notification.job.workflowName} - ${notification.job.name} ${statusLabel}`
+        ),
+        url: sanitizeLine(notification.job.url),
+        description: trimToDiscordDescription(description),
+        color,
+        author: {
+          name: sanitizeLine(notification.sender)
+        }
+      }
+    ]
+  };
 }
 
 export function formatPushNotification(notification: PushNotification): FormattedNotificationMessage {

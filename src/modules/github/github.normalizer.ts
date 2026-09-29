@@ -1,6 +1,6 @@
 import { HttpError } from "../../common/http-error.js";
-import type { PushNotification, WorkflowRunNotification } from "../notification/notification.types.js";
-import type { GitHubPushPayload, GitHubWorkflowRunPayload } from "./github.types.js";
+import type { PushNotification, WorkflowJobNotification, WorkflowRunNotification } from "../notification/notification.types.js";
+import type { GitHubPushPayload, GitHubWorkflowJobPayload, GitHubWorkflowRunPayload } from "./github.types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -223,6 +223,85 @@ export function normalizeWorkflowRun(payload: GitHubWorkflowRunPayload, delivery
       event: payload.workflow_run.event,
       actor: payload.workflow_run.actor?.login ?? payload.sender.login
     },
+    occurredAt: new Date().toISOString()
+  };
+}
+
+export function parseGitHubWorkflowJobPayload(input: unknown): GitHubWorkflowJobPayload {
+  if (!isRecord(input)) {
+    throw new HttpError(400, "Invalid GitHub workflow_job payload");
+  }
+
+  const repository = requireRecord(input, "repository");
+  const owner = requireRecord(repository, "owner");
+  const workflowJob = requireRecord(input, "workflow_job");
+  const sender = requireRecord(input, "sender");
+
+  const stepsValue = workflowJob.steps;
+  const steps = Array.isArray(stepsValue)
+    ? stepsValue
+        .filter((step): step is Record<string, unknown> => isRecord(step))
+        .map((step) => ({
+          name: typeof step.name === "string" ? step.name : "Step",
+          status: typeof step.status === "string" ? step.status : "unknown",
+          conclusion: typeof step.conclusion === "string" ? step.conclusion : null,
+          number: typeof step.number === "number" ? step.number : 0
+        }))
+    : undefined;
+
+  return {
+    action: requireString(input, "action"),
+    repository: {
+      full_name: requireString(repository, "full_name"),
+      name: requireString(repository, "name"),
+      owner: {
+        login: requireString(owner, "login")
+      }
+    },
+    workflow_job: {
+      id: requireNumber(workflowJob, "id"),
+      run_id: requireNumber(workflowJob, "run_id"),
+      workflow_name: nullableString(workflowJob, "workflow_name"),
+      head_branch: nullableString(workflowJob, "head_branch"),
+      head_sha: requireString(workflowJob, "head_sha"),
+      name: requireString(workflowJob, "name"),
+      status: requireString(workflowJob, "status"),
+      conclusion: nullableString(workflowJob, "conclusion"),
+      started_at: nullableString(workflowJob, "started_at"),
+      completed_at: nullableString(workflowJob, "completed_at"),
+      html_url: requireString(workflowJob, "html_url"),
+      ...(steps !== undefined ? { steps } : {})
+    },
+    sender: {
+      login: requireString(sender, "login")
+    }
+  };
+}
+
+export function normalizeWorkflowJob(payload: GitHubWorkflowJobPayload, deliveryId: string): WorkflowJobNotification {
+  return {
+    type: "github.workflow_job",
+    deliveryId,
+    repository: {
+      owner: payload.repository.owner.login,
+      name: payload.repository.name,
+      fullName: payload.repository.full_name
+    },
+    job: {
+      id: payload.workflow_job.id,
+      runId: payload.workflow_job.run_id,
+      workflowName: payload.workflow_job.workflow_name ?? "Workflow",
+      name: payload.workflow_job.name,
+      url: payload.workflow_job.html_url,
+      status: payload.workflow_job.status,
+      conclusion: payload.workflow_job.conclusion,
+      branch: payload.workflow_job.head_branch ? normalizeBranch(payload.workflow_job.head_branch) : null,
+      headSha: payload.workflow_job.head_sha,
+      startedAt: payload.workflow_job.started_at,
+      completedAt: payload.workflow_job.completed_at,
+      ...(payload.workflow_job.steps !== undefined ? { steps: payload.workflow_job.steps } : {})
+    },
+    sender: payload.sender.login,
     occurredAt: new Date().toISOString()
   };
 }

@@ -41,6 +41,37 @@ export interface WorkflowRunNotification {
     actor: string;
   };
   occurredAt: string;
+};
+
+export interface WorkflowJobNotification {
+  type: "github.workflow_job";
+  deliveryId: string;
+  repository: {
+    owner: string;
+    name: string;
+    fullName: string;
+  };
+  job: {
+    id: number;
+    runId: number;
+    workflowName: string;
+    name: string;
+    url: string;
+    status: string;
+    conclusion: string | null;
+    branch: string | null;
+    headSha: string;
+    startedAt: string | null;
+    completedAt: string | null;
+    steps?: Array<{
+      name: string;
+      status: string;
+      conclusion: string | null;
+      number: number;
+    }>;
+  };
+  sender: string;
+  occurredAt: string;
 }
 
-export type NotificationPayload = PushNotification | WorkflowRunNotification;
+export type NotificationPayload = PushNotification | WorkflowRunNotification | WorkflowJobNotification;

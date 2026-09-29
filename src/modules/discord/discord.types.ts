@@ -4,6 +4,18 @@ export interface DiscordSendMessageInput {
   embeds?: DiscordEmbed[];
 }
 
+export interface DiscordEditMessageInput {
+  channelId: string;
+  messageId: string;
+  content?: string;
+  embeds?: DiscordEmbed[];
+}
+
+export interface DiscordMessage {
+  id: string;
+  channelId: string;
+}
+
 export interface DiscordCreateThreadInput {
   channelId: string;
   name: string;
