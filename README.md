@@ -151,3 +151,22 @@ The controller only extracts HTTP input and returns responses. Add future GitHub
 
 Only `push` is implemented now.
 
+## CI/CD Deployment to Render
+
+The repository includes a GitHub Actions workflow [deploy.yml](file:///.github/workflows/deploy.yml) that runs automatically when code is pushed to `main` (or triggered manually via `workflow_dispatch`):
+
+1. **Validation**: Runs `npm run typecheck` and `npm run build` on Node.js 22 to ensure code integrity before deployment.
+2. **Deploy Trigger**: Calls the Render Deploy Hook via POST request to trigger automatic redeployment.
+
+### Setup Render Deploy Hook
+
+1. Go to your **Render Dashboard** and select your Web Service (`github-discord-notify-bot`).
+2. Navigate to **Settings** > scroll to **Deploy Hook**.
+3. Click **Create Deploy Hook** (or copy your existing hook URL). It looks like:
+   `https://api.render.com/deploy/srv-xxxxxx?key=yyyyyy`
+4. In this GitHub repository, go to **Settings** > **Secrets and variables** > **Actions**.
+5. Click **New repository secret**:
+   - **Name**: `RENDER_DEPLOY_HOOK_URL`
+   - **Value**: `<your-render-deploy-hook-url>`
+6. *(Recommended)* In Render Service Settings > **Build & Deploy**, set **Auto-Deploy** to `No` so only passing GitHub Action builds trigger Render deployments.
+
