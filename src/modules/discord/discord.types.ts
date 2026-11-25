@@ -29,6 +29,12 @@ export interface DiscordSendMessageBody {
   };
 }
 
+export interface DiscordEmbedField {
+  name: string;
+  value: string;
+  inline?: boolean;
+}
+
 export interface DiscordEmbed {
   title?: string;
   url?: string;
@@ -37,6 +43,11 @@ export interface DiscordEmbed {
   author?: {
     name: string;
   };
+  fields?: DiscordEmbedField[];
+  footer?: {
+    text: string;
+  };
+  timestamp?: string;
 }
 
 export interface DiscordCreateThreadBody {
@@ -48,4 +59,23 @@ export interface DiscordCreateThreadBody {
 export interface DiscordThread {
   id: string;
   name: string;
+  parentId?: string | null;
+  archived?: boolean;
+  locked?: boolean;
+  archiveTimestamp?: string;
+}
+
+export interface DiscordChannelInfo {
+  id: string;
+  name: string;
+  type: number;
+  guildId?: string;
+  parentId?: string | null;
+}
+
+export interface DiscordCreateGuildChannelInput {
+  guildId: string;
+  name: string;
+  parentId?: string | null;
+  topic?: string;
 }

@@ -29,3 +29,13 @@ services:
         sync: false
       - key: DISCORD_CHANNEL_ID
         sync: false
+      - key: DISCORD_GUILD_ID
+        sync: false
+      - key: DISCORD_AGENT_CHANNEL_ID
+        sync: false
+      - key: DISCORD_AGENT_CHANNEL_NAME
+        value: ai-notifications
+      - key: AGENT_API_TOKENS
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false

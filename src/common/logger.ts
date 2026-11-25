@@ -4,7 +4,7 @@ import { env } from "../config/env.js";
 const loggerOptions: pino.LoggerOptions = {
   level: env.LOG_LEVEL,
   redact: {
-    paths: ["authorization", "headers.authorization", "DISCORD_BOT_TOKEN", "GITHUB_WEBHOOK_SECRET"],
+    paths: ["authorization", "headers.authorization", "DISCORD_BOT_TOKEN", "GITHUB_WEBHOOK_SECRET", "AGENT_API_TOKENS"],
     censor: "[redacted]"
   }
 };

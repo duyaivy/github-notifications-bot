@@ -9,12 +9,17 @@ The app runs the HTTP server and queue worker in one Node.js process. The HTTP s
 Folder layout:
 
 ```text
-src/config       environment validation
-src/database     SQLite/libSQL connection and migrations
-src/common       logging, errors, request logging, shutdown helpers
+src/config            environment validation
+src/database          SQLite/libSQL connection and migrations
+src/common            logging, errors, request logging, shutdown helpers
 src/modules/github
 src/modules/queue
 src/modules/repo-thread
+src/modules/agent-thread
+src/modules/agent-notify
+src/modules/ai-docs
+src/modules/auth
+src/modules/mcp
 src/modules/notification
 src/modules/discord
 ```
@@ -41,6 +46,13 @@ TURSO_AUTH_TOKEN=
 GITHUB_WEBHOOK_SECRET=replace_me
 DISCORD_BOT_TOKEN=replace_me
 DISCORD_CHANNEL_ID=replace_me
+DISCORD_GUILD_ID=
+DISCORD_AGENT_CHANNEL_ID=
+DISCORD_AGENT_CHANNEL_NAME=ai-notifications
+AGENT_API_TOKENS=
+PUBLIC_BASE_URL=
+AGENT_RATE_LIMIT_MAX=60
+AGENT_RATE_LIMIT_WINDOW_MS=60000
 WORKER_POLL_INTERVAL_MS=2000
 WORKER_BATCH_SIZE=10
 WORKER_MAX_ATTEMPTS=5
@@ -149,7 +161,31 @@ If a worker exits after claiming a job, stale `processing` jobs older than `WORK
 
 The controller only extracts HTTP input and returns responses. Add future GitHub event support in the GitHub service by adding an event-specific payload parser and normalizer under `src/modules/github`, then enqueue a normalized notification type consumed by the notification module.
 
-Only `push` is implemented now.
+Only `push`, `workflow_run`, and `workflow_job` are implemented for GitHub webhooks.
+
+## AI Agent Notifications & MCP
+
+The backend also exposes public AI-readable docs, a Bearer-protected REST API, and a stateless MCP Streamable HTTP endpoint so AI agents (Muse AI, ChatGPT, Gemini, Claude, Codex, Cursor) can send task completion (`completed`) and approval-needed (`needs_approval`) notifications to Discord.
+
+### Discord Channel & Thread Behavior
+
+- AI notifications go to a separate Discord channel (configured via `DISCORD_AGENT_CHANNEL_ID`, or auto-discovered/created as `#ai-notifications` in the same guild and category as `DISCORD_CHANNEL_ID` when `Manage Channels` is granted).
+- Each AI platform uses **one canonical thread** (`muse`, `chatgpt`, `gemini`, `claude`, `codex`, `cursor`, `custom`), never split by user account or task.
+- Before creating a new thread, the service checks both local `agent_threads` and Discord active/public-archived threads (requires `Read Message History` to inspect archived threads).
+
+### Endpoints
+
+- Public Docs (no auth):
+  - `GET /llms.txt` — AI-readable integration guide
+  - `GET /openapi.json` — OpenAPI 3.1 schema
+  - `GET /docs/ai` — Human-readable setup page
+- Authenticated Endpoints (`Authorization: Bearer <token>` from `AGENT_API_TOKENS`):
+  - `POST /api/v1/notifications` — Queue a notification (`202 Accepted`)
+  - `GET /api/v1/notifications/:jobId` — Check queue delivery status
+  - `GET /api/v1/threads` — List canonical agent keys and Discord thread bindings
+  - `POST /mcp` — Stateless MCP Streamable HTTP (`send_notification`, `list_agents`, `get_notification_status`)
+
+`AGENT_API_TOKENS` supports comma-separated tokens and optional agent prefixes (e.g. `muse:tok_abc,tok_shared`), where prefixed tokens automatically default `agent` when omitted. If `AGENT_API_TOKENS` is unset, `/api/v1/*` and `/mcp` fail closed with `503`.
 
 ## CI/CD Deployment to Render
 

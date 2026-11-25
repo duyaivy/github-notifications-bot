@@ -74,4 +74,33 @@ export interface WorkflowJobNotification {
   occurredAt: string;
 }
 
-export type NotificationPayload = PushNotification | WorkflowRunNotification | WorkflowJobNotification;
+export type AgentKey = "muse" | "chatgpt" | "gemini" | "claude" | "codex" | "cursor" | "custom";
+
+export type AgentNotificationStatus = "completed" | "needs_approval" | "error" | "info";
+
+export interface AgentNotificationField {
+  name: string;
+  value: string;
+  inline?: boolean;
+}
+
+export interface AgentNotification {
+  type: "agent.notification";
+  deliveryId: string;
+  agent: AgentKey;
+  status: AgentNotificationStatus;
+  task?: string;
+  title: string;
+  summary?: string;
+  actionNeeded?: string;
+  url?: string;
+  fields?: AgentNotificationField[];
+  accountHint?: string;
+  occurredAt: string;
+}
+
+export type NotificationPayload =
+  | PushNotification
+  | WorkflowRunNotification
+  | WorkflowJobNotification
+  | AgentNotification;
