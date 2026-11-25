@@ -1,4 +1,4 @@
-import { AppError } from "../../common/errors.js";
+import { AppError, toSafeError } from "../../common/errors.js";
 import { logger } from "../../common/logger.js";
 import { env } from "../../config/env.js";
 import { DiscordApiError } from "../discord/discord.errors.js";
@@ -95,12 +95,26 @@ export class AgentThreadService {
       return matchedChannel.id;
     }
 
-    const created = await this.discord.createGuildTextChannel({
-      guildId,
-      name: targetName,
-      ...(baseChannel.parentId ? { parentId: baseChannel.parentId } : {}),
-      topic: "AI agent notifications (one fixed thread per AI platform)"
-    });
+    let created;
+    try {
+      created = await this.discord.createGuildTextChannel({
+        guildId,
+        name: targetName,
+        ...(baseChannel.parentId ? { parentId: baseChannel.parentId } : {}),
+        topic: "AI agent notifications (one fixed thread per AI platform)"
+      });
+    } catch (error) {
+      if (error instanceof DiscordApiError && error.status === 403) {
+        // Fallback in-memory when bot lacks Manage Channels; omit app_settings so dedicated channel resolves once created/permitted
+        logger.warn(
+          { guildId, targetName, fallbackChannelId: this.config.githubChannelId, error: toSafeError(error) },
+          "bot lacks Manage Channels to create agent channel; falling back to DISCORD_CHANNEL_ID"
+        );
+        this.cachedChannelId = this.config.githubChannelId;
+        return this.config.githubChannelId;
+      }
+      throw error;
+    }
 
     await this.threads.setSetting(agentChannelSettingKey, created.id);
     this.cachedChannelId = created.id;

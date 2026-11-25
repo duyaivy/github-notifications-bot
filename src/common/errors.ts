@@ -1,6 +1,7 @@
 export interface SafeError {
   name: string;
   message: string;
+  cause?: string;
   stack?: string;
 }
 
@@ -16,9 +17,11 @@ export class AppError extends Error {
 
 export function toSafeError(error: unknown): SafeError {
   if (error instanceof Error) {
+    const cause = formatSafeCause(error.cause);
     return {
       name: error.name,
       message: error.message,
+      ...(cause ? { cause } : {}),
       ...(error.stack ? { stack: error.stack } : {})
     };
   }
@@ -27,6 +30,16 @@ export function toSafeError(error: unknown): SafeError {
     name: "UnknownError",
     message: typeof error === "string" ? error : "Unknown error"
   };
+}
+
+function formatSafeCause(cause: unknown): string | undefined {
+  if (typeof cause === "string" && cause.length > 0) {
+    return cause.slice(0, 500);
+  }
+  if (cause instanceof Error) {
+    return cause.message.slice(0, 500);
+  }
+  return undefined;
 }
 
 export function safeErrorMessage(error: unknown): string {
