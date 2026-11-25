@@ -1,4 +1,8 @@
+import type { DiscordEmbed, DiscordEmbedField } from "../discord/discord.types.js";
 import type {
+  AgentKey,
+  AgentNotification,
+  AgentNotificationStatus,
   NotificationPayload,
   PushNotification,
   WorkflowJobNotification,
@@ -7,24 +11,19 @@ import type {
 
 const discordEmbedDescriptionLimit = 4096;
 const discordEmbedTitleLimit = 256;
+const discordFieldNameLimit = 256;
+const discordFieldValueLimit = 1024;
 const pushColor = 0x5865f2;
 const createColor = 0x2da44e;
 const forcePushColor = 0xfb8500;
 const successColor = 0x2da44e;
 const warningColor = 0xd29922;
+const approvalColor = 0xfb8500;
 const failureColor = 0xcf222e;
 const neutralColor = 0x8c959f;
 
 export interface FormattedNotificationMessage {
-  embeds: Array<{
-    title: string;
-    url?: string;
-    description: string;
-    color: number;
-    author: {
-      name: string;
-    };
-  }>;
+  embeds: DiscordEmbed[];
 }
 
 export function formatNotification(notification: NotificationPayload): FormattedNotificationMessage {
@@ -34,8 +33,95 @@ export function formatNotification(notification: NotificationPayload): Formatted
   if (notification.type === "github.workflow_job") {
     return formatWorkflowJobNotification(notification);
   }
+  if (notification.type === "agent.notification") {
+    return formatAgentNotification(notification);
+  }
 
   return formatWorkflowRunNotification(notification);
+}
+
+export function formatAgentNotification(notification: AgentNotification): FormattedNotificationMessage {
+  const statusDisplay = agentStatusDisplay(notification.status);
+  const lines: string[] = [];
+
+  if (notification.actionNeeded) {
+    lines.push(`**Cần làm ngay:** ${sanitizeMultiline(notification.actionNeeded)}`);
+  }
+  if (notification.task) {
+    lines.push(`**Task:** ${sanitizeLine(notification.task)}`);
+  }
+  if (notification.summary) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push(sanitizeMultiline(notification.summary));
+  }
+  if (lines.length === 0) {
+    lines.push(`**Trạng thái:** ${statusDisplay.label}`);
+  }
+
+  const fields: DiscordEmbedField[] = (notification.fields ?? []).slice(0, 10).map((field) => ({
+    name: trimToLimit(sanitizeLine(field.name), discordFieldNameLimit),
+    value: trimToLimit(sanitizeMultiline(field.value), discordFieldValueLimit),
+    ...(field.inline !== undefined ? { inline: field.inline } : {})
+  }));
+
+  const fieldsChars = fields.reduce((sum, field) => sum + field.name.length + field.value.length, 0);
+  const descriptionBudget = Math.max(400, Math.min(discordEmbedDescriptionLimit, 5200 - fieldsChars));
+  const footerText = notification.accountHint
+    ? `agent:${notification.agent} • ${sanitizeLine(notification.accountHint)}`
+    : `agent:${notification.agent}`;
+
+  return {
+    embeds: [
+      {
+        title: trimToDiscordTitle(`${statusDisplay.badge} ${sanitizeLine(notification.title)}`),
+        ...(notification.url ? { url: sanitizeLine(notification.url) } : {}),
+        description: trimToLimit(lines.join("\n"), descriptionBudget, "\n...truncated"),
+        color: statusDisplay.color,
+        author: {
+          name: agentDisplayName(notification.agent)
+        },
+        ...(fields.length > 0 ? { fields } : {}),
+        footer: {
+          text: trimToLimit(footerText, 256)
+        },
+        timestamp: notification.occurredAt
+      }
+    ]
+  };
+}
+
+function agentStatusDisplay(status: AgentNotificationStatus): { badge: string; label: string; color: number } {
+  switch (status) {
+    case "completed":
+      return { badge: "[HOÀN THÀNH] ✅", label: "Hoàn thành", color: successColor };
+    case "needs_approval":
+      return { badge: "[CẦN DUYỆT] ⚠️", label: "Cần bro duyệt / xác nhận", color: approvalColor };
+    case "error":
+      return { badge: "[LỖI / BỊ CHẶN] ❌", label: "Lỗi hoặc bị chặn", color: failureColor };
+    case "info":
+      return { badge: "[CẬP NHẬT] ℹ️", label: "Cập nhật tiến độ", color: pushColor };
+  }
+}
+
+function agentDisplayName(agent: AgentKey): string {
+  switch (agent) {
+    case "muse":
+      return "Muse AI";
+    case "chatgpt":
+      return "ChatGPT";
+    case "gemini":
+      return "Gemini";
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "cursor":
+      return "Cursor";
+    case "custom":
+      return "AI Agent";
+  }
 }
 
 export function formatWorkflowJobNotification(notification: WorkflowJobNotification): FormattedNotificationMessage {
@@ -183,7 +269,29 @@ function firstLine(value: string): string {
 }
 
 function sanitizeLine(value: string): string {
-  return value.replaceAll("@everyone", "@ everyone").replaceAll("@here", "@ here").replace(/\s+/g, " ").trim();
+  return neutralizeMentions(value).replace(/\s+/g, " ").trim();
+}
+
+function sanitizeMultiline(value: string): string {
+  return neutralizeMentions(value)
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function neutralizeMentions(value: string): string {
+  return value.replaceAll("@everyone", "@ everyone").replaceAll("@here", "@ here");
+}
+
+function trimToLimit(content: string, maxLength: number, suffix = "..."): string {
+  if (content.length <= maxLength) {
+    return content;
+  }
+
+  return `${content.slice(0, Math.max(0, maxLength - suffix.length)).trimEnd()}${suffix}`;
 }
 
 function truncationLine(total: number, included: number): string {
@@ -196,17 +304,9 @@ function pluralizeCommit(total: number): string {
 }
 
 function trimToDiscordTitle(content: string): string {
-  if (content.length <= discordEmbedTitleLimit) {
-    return content;
-  }
-
-  return `${content.slice(0, discordEmbedTitleLimit - 3).trimEnd()}...`;
+  return trimToLimit(content, discordEmbedTitleLimit);
 }
 
 function trimToDiscordDescription(content: string): string {
-  if (content.length <= discordEmbedDescriptionLimit) {
-    return content;
-  }
-
-  return `${content.slice(0, discordEmbedDescriptionLimit - 13).trimEnd()}\n...truncated`;
+  return trimToLimit(content, discordEmbedDescriptionLimit, "\n...truncated");
 }
