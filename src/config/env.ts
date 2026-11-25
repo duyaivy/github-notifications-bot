@@ -6,6 +6,15 @@ const optionalNonEmptyString = z.preprocess(
   z.string().min(1).optional()
 );
 
+const optionalHttpUrl = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z
+    .string()
+    .url()
+    .refine((value) => value.startsWith("http://") || value.startsWith("https://"), "Must be an http(s) URL")
+    .optional()
+);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   HOST: z.string().min(1).default("0.0.0.0"),
@@ -16,6 +25,13 @@ const envSchema = z.object({
   GITHUB_WEBHOOK_SECRET: z.string().min(1, "GITHUB_WEBHOOK_SECRET is required"),
   DISCORD_BOT_TOKEN: z.string().min(1, "DISCORD_BOT_TOKEN is required"),
   DISCORD_CHANNEL_ID: z.string().min(1, "DISCORD_CHANNEL_ID is required"),
+  DISCORD_GUILD_ID: optionalNonEmptyString,
+  DISCORD_AGENT_CHANNEL_ID: optionalNonEmptyString,
+  DISCORD_AGENT_CHANNEL_NAME: z.string().min(1).default("ai-notifications"),
+  AGENT_API_TOKENS: optionalNonEmptyString,
+  PUBLIC_BASE_URL: optionalHttpUrl,
+  AGENT_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+  AGENT_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
   WORKER_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),
   WORKER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
