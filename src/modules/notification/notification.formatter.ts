@@ -75,7 +75,7 @@ export function formatAgentNotification(notification: AgentNotification): Format
   return {
     embeds: [
       {
-        title: trimToDiscordTitle(`${statusDisplay.badge} ${sanitizeLine(notification.title)}`),
+        title: trimToDiscordTitle(sanitizeLine(notification.title)),
         ...(notification.url ? { url: sanitizeLine(notification.url) } : {}),
         description: trimToLimit(lines.join("\n"), descriptionBudget, "\n...truncated"),
         color: statusDisplay.color,
@@ -92,16 +92,16 @@ export function formatAgentNotification(notification: AgentNotification): Format
   };
 }
 
-function agentStatusDisplay(status: AgentNotificationStatus): { badge: string; label: string; color: number } {
+function agentStatusDisplay(status: AgentNotificationStatus): { label: string; color: number } {
   switch (status) {
     case "completed":
-      return { badge: "[HOÀN THÀNH] ✅", label: "Hoàn thành", color: successColor };
+      return { label: "Hoàn thành", color: successColor };
     case "needs_approval":
-      return { badge: "[CẦN DUYỆT] ⚠️", label: "Cần bro duyệt / xác nhận", color: approvalColor };
+      return { label: "Cần bro duyệt / xác nhận", color: approvalColor };
     case "error":
-      return { badge: "[LỖI / BỊ CHẶN] ❌", label: "Lỗi hoặc bị chặn", color: failureColor };
+      return { label: "Lỗi hoặc bị chặn", color: failureColor };
     case "info":
-      return { badge: "[CẬP NHẬT] ℹ️", label: "Cập nhật tiến độ", color: pushColor };
+      return { label: "Cập nhật tiến độ", color: pushColor };
   }
 }
 
