@@ -31,8 +31,10 @@ const { runMigrations } = await import("../src/database/migrate.js");
 const { AgentThreadRepository } = await import("../src/modules/agent-thread/agent-thread.repository.js");
 const { AgentThreadService } = await import("../src/modules/agent-thread/agent-thread.service.js");
 const { normalizeAgentKey, normalizeAgentStatus } = await import("../src/modules/agent-notify/agent-notify.types.js");
+const { toSafeError } = await import("../src/common/errors.js");
 const { StaticBearerTokenVerifier } = await import("../src/modules/auth/bearer-token.verifier.js");
 const { DiscordApiError } = await import("../src/modules/discord/discord.errors.js");
+const { DiscordService } = await import("../src/modules/discord/discord.service.js");
 const { formatAgentNotification } = await import("../src/modules/notification/notification.formatter.js");
 const { NotificationService } = await import("../src/modules/notification/notification.service.js");
 const { QueueRepository } = await import("../src/modules/queue/queue.repository.js");
@@ -603,4 +605,101 @@ test("Account switching delivers to the exact same Discord thread ID and auto-ch
   assert.equal(threadCreateCount, 1);
   assert.deepEqual(deliveredChannels, ["thread-chatgpt-single", "thread-chatgpt-single"]);
 });
+
+test("AgentThreadService falls back to DISCORD_CHANNEL_ID when createGuildTextChannel fails with 403 and upgrades later when dedicated channel appears", async () => {
+  const repo = new AgentThreadRepository(db);
+  await repo.deleteByAgent("muse");
+  await repo.deleteSetting("agent_channel_id");
+  await repo.deleteSetting("discord_guild_id");
+
+  let createChannelAttempts = 0;
+  let dedicatedChannelExists = false;
+
+  const mockDiscord = {
+    async getChannel(channelId: string) {
+      return { id: channelId, name: "github", type: 0, guildId: "guild-1", parentId: "cat-info" };
+    },
+    async listGuildChannels() {
+      const base = [{ id: "100000000000000001", name: "github", type: 0, guildId: "guild-1", parentId: "cat-info" }];
+      if (dedicatedChannelExists) {
+        base.push({ id: "chan-ai-manual", name: "ai-notifications", type: 0, guildId: "guild-1", parentId: "cat-info" });
+      }
+      return base;
+    },
+    async createGuildTextChannel() {
+      createChannelAttempts += 1;
+      throw new DiscordApiError("Discord API returned 403 for destination (code 50013: Missing Permissions)", {
+        status: 403,
+        discordCode: 50013,
+        retryable: false,
+        cause: '{"message":"Missing Permissions","code":50013}'
+      });
+    },
+    async listActiveGuildThreads() {
+      return [];
+    },
+    async listPublicArchivedThreads() {
+      return [];
+    },
+    async createThread(input: { channelId: string; name: string }) {
+      return { id: `thread-${input.channelId}-${input.name}`, name: input.name, parentId: input.channelId };
+    }
+  };
+
+  const service = new AgentThreadService(repo, mockDiscord as never, {
+    githubChannelId: "100000000000000001",
+    agentChannelName: "ai-notifications"
+  });
+
+  const fallbackThread = await service.findOrCreateThread("muse");
+  assert.equal(fallbackThread.discordChannelId, "100000000000000001");
+  assert.equal(fallbackThread.discordThreadId, "thread-100000000000000001-muse");
+  assert.equal(await repo.getSetting("agent_channel_id"), null);
+
+  // Second call in same process uses cached fallback without hammering createGuildTextChannel
+  await service.findOrCreateThread("codex");
+  assert.equal(createChannelAttempts, 1);
+
+  // After user creates #ai-notifications manually and service restarts, threads migrate cleanly
+  dedicatedChannelExists = true;
+  const restartedService = new AgentThreadService(repo, mockDiscord as never, {
+    githubChannelId: "100000000000000001",
+    agentChannelName: "ai-notifications"
+  });
+  const dedicatedThread = await restartedService.findOrCreateThread("muse");
+  assert.equal(dedicatedThread.discordChannelId, "chan-ai-manual");
+  assert.equal(dedicatedThread.discordThreadId, "thread-chan-ai-manual-muse");
+  assert.equal(await repo.getSetting("agent_channel_id"), "chan-ai-manual");
+});
+
+test("DiscordService surfaces Discord error code and message while toSafeError preserves cause", async () => {
+  const discord = new DiscordService();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ message: "Missing Permissions", code: 50013 }), {
+      status: 403,
+      headers: { "content-type": "application/json" }
+    });
+
+  try {
+    await assert.rejects(
+      () => discord.sendMessage({ channelId: "123", content: "hello" }),
+      (error: unknown) => {
+        assert.ok(error instanceof DiscordApiError);
+        assert.equal(error.status, 403);
+        assert.equal(error.discordCode, 50013);
+        assert.equal(error.retryable, false);
+        assert.ok(error.message.includes("50013"), `unexpected message: ${error.message}`);
+        assert.ok(error.message.includes("Missing Permissions"), `unexpected message: ${error.message}`);
+
+        const safe = toSafeError(error);
+        assert.ok(safe.cause?.includes("50013"), `unexpected safe.cause: ${safe.cause}`);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 

@@ -253,13 +253,19 @@ export class DiscordService {
       const retryAfterMs = getRetryAfterMs(response, safeBody);
       const retryable = response.status === 429 || response.status >= 500;
       const permanentPermissionFailure = response.status === 403 || response.status === 404;
+      const discordError = parseDiscordErrorBody(safeBody);
+      const detail = formatDiscordErrorDetail(discordError, safeBody);
 
-      throw new DiscordApiError(`Discord API returned ${response.status}${permanentPermissionFailure ? " for destination" : ""}`, {
-        status: response.status,
-        retryable,
-        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-        cause: safeBody
-      });
+      throw new DiscordApiError(
+        `Discord API returned ${response.status}${permanentPermissionFailure ? " for destination" : ""}${detail}`,
+        {
+          status: response.status,
+          ...(discordError?.code === undefined ? {} : { discordCode: discordError.code }),
+          retryable,
+          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+          cause: safeBody
+        }
+      );
     }
 
     return response;
@@ -337,4 +343,32 @@ function getRetryAfterMs(response: Response, body: string): number | undefined {
   }
 
   return undefined;
+}
+
+function parseDiscordErrorBody(body: string): { code?: number; message?: string } | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+
+    const record = parsed as { code?: unknown; message?: unknown };
+    return {
+      ...(typeof record.code === "number" ? { code: record.code } : {}),
+      ...(typeof record.message === "string" ? { message: record.message } : {})
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatDiscordErrorDetail(parsed: { code?: number; message?: string } | null, rawBody: string): string {
+  if (parsed?.code !== undefined && parsed.message) {
+    return ` (code ${parsed.code}: ${parsed.message})`;
+  }
+  if (parsed?.message) {
+    return ` (${parsed.message})`;
+  }
+  const trimmed = rawBody.trim().slice(0, 200);
+  return trimmed ? ` (${trimmed})` : "";
 }
