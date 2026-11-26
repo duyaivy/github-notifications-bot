@@ -17,6 +17,9 @@ import { AgentNotifyController } from "./modules/agent-notify/agent-notify.contr
 import { createAgentNotifyRoutes } from "./modules/agent-notify/agent-notify.routes.js";
 import { createAiDocsRoutes } from "./modules/ai-docs/ai-docs.routes.js";
 import { createMcpRoutes } from "./modules/mcp/mcp.routes.js";
+import { createOAuthRoutes, mcpMetadataPath } from "./modules/oauth/oauth.routes.js";
+import { OAuthRepository } from "./modules/oauth/oauth.repository.js";
+import { OAuthAccessTokenVerifier } from "./modules/oauth/oauth-token.verifier.js";
 import { StaticBearerTokenVerifier } from "./modules/auth/bearer-token.verifier.js";
 import { createAgentAuthMiddleware } from "./modules/auth/auth.middleware.js";
 import { createRateLimitMiddleware } from "./modules/auth/rate-limit.middleware.js";
@@ -45,20 +48,32 @@ export function createApp(db: DatabaseClient, options: CreateAppOptions = {}): e
   const agentNotifyController = new AgentNotifyController(agentNotify);
 
   const tokenVerifier = options.tokenVerifier ?? new StaticBearerTokenVerifier(env.AGENT_API_TOKENS);
-  const agentMiddlewares = [
-    createAgentAuthMiddleware({ verifier: tokenVerifier }),
-    createRateLimitMiddleware({
-      maxRequests: options.rateLimitMax ?? env.AGENT_RATE_LIMIT_MAX,
-      windowMs: options.rateLimitWindowMs ?? env.AGENT_RATE_LIMIT_WINDOW_MS
-    })
-  ];
+  const agentAuth = createAgentAuthMiddleware({ verifier: tokenVerifier });
+  const rateLimit = createRateLimitMiddleware({
+    maxRequests: options.rateLimitMax ?? env.AGENT_RATE_LIMIT_MAX,
+    windowMs: options.rateLimitWindowMs ?? env.AGENT_RATE_LIMIT_WINDOW_MS
+  });
 
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
   app.use(requestLogger);
   app.use(createGitHubRoutes(githubController));
   app.use(createAiDocsRoutes());
-  app.use(["/api/v1", "/mcp"], ...agentMiddlewares);
+  let mcpAuth = agentAuth;
+  if (env.PUBLIC_BASE_URL && env.OAUTH_OWNER_SECRET) {
+    const base = new URL(env.PUBLIC_BASE_URL);
+    if (env.NODE_ENV !== "production" || base.protocol === "https:") {
+      const resource = new URL("/mcp", base.origin);
+      const repository = new OAuthRepository(db, resource.href);
+      app.use(createOAuthRoutes(repository, base.origin, resource.href, env.OAUTH_OWNER_SECRET));
+      mcpAuth = createAgentAuthMiddleware({
+        verifier: new OAuthAccessTokenVerifier(repository, tokenVerifier, resource),
+        resourceMetadataUrl: base.origin + mcpMetadataPath
+      });
+    }
+  }
+  app.use("/api/v1", agentAuth, rateLimit);
+  app.use("/mcp", mcpAuth, rateLimit);
   app.use(express.json({ limit: "1mb" }));
 
   app.use(createAgentNotifyRoutes(agentNotifyController));

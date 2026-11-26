@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,7 +23,8 @@ process.env.DISCORD_GUILD_ID = "";
 process.env.DISCORD_AGENT_CHANNEL_ID = "";
 process.env.DISCORD_AGENT_CHANNEL_NAME = "ai-notifications";
 process.env.AGENT_API_TOKENS = "muse:tok_muse,tok_shared";
-process.env.PUBLIC_BASE_URL = "";
+process.env.PUBLIC_BASE_URL = "https://notify.example.test/";
+process.env.OAUTH_OWNER_SECRET = "test-only-owner-secret-for-oauth";
 process.env.LOG_LEVEL = "silent";
 
 const { createApp } = await import("../src/app.js");
@@ -54,7 +56,7 @@ before(async () => {
   await configureDatabase(db);
 
   const app = createApp(db, {
-    tokenVerifier: new StaticBearerTokenVerifier("muse:tok_muse,tok_shared"),
+    tokenVerifier: new StaticBearerTokenVerifier("muse:tok_muse,tok_shared,codex:tok_oauth_regression"),
     rateLimitMax: 5,
     rateLimitWindowMs: 60_000
   });
@@ -115,7 +117,8 @@ test("formatAgentNotification creates rich embed under Discord limits and neutra
   });
 
   const embed = formatted.embeds[0]!;
-  assert.ok(embed.title?.startsWith("[CẦN DUYỆT] ⚠️"));
+  assert.ok(embed.title?.startsWith("Need "));
+  assert.equal(embed.color, 0xfb8500);
   assert.ok(!embed.title?.includes("@everyone"));
   assert.ok(!embed.description?.includes("@here"));
   assert.equal(embed.author?.name, "Muse AI");
@@ -703,3 +706,195 @@ test("DiscordService surfaces Discord error code and message while toSafeError p
 });
 
 
+
+test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and static REST compatibility", async () => {
+  const issuer = "https://notify.example.test";
+  const resource = issuer + "/mcp";
+  const metadataPath = "/.well-known/oauth-protected-resource";
+  for (const endpoint of [metadataPath, metadataPath + "/mcp"]) {
+    const response = await fetch(baseUrl + endpoint);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      resource,
+      authorization_servers: [issuer],
+      scopes_supported: ["mcp"],
+      bearer_methods_supported: ["header"]
+    });
+  }
+  const discovery = await fetch(baseUrl + "/.well-known/oauth-authorization-server");
+  assert.equal(discovery.status, 200);
+  const metadata = await discovery.json();
+  assert.equal(metadata.issuer, issuer);
+  assert.equal(metadata.authorization_endpoint, issuer + "/oauth/authorize");
+  assert.equal(metadata.token_endpoint, issuer + "/oauth/token");
+  assert.equal(metadata.registration_endpoint, issuer + "/oauth/register");
+  assert.deepEqual(metadata.code_challenge_methods_supported, ["S256"]);
+  assert.deepEqual(metadata.grant_types_supported, ["authorization_code", "refresh_token"]);
+  assert.deepEqual(metadata.token_endpoint_auth_methods_supported, ["none"]);
+  assert.equal(metadata.authorization_response_iss_parameter_supported, true);
+
+  const postJson = (endpoint: string, body: object, token?: string) => fetch(baseUrl + endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(token ? { authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify(body)
+  });
+  const postForm = (endpoint: string, fields: Record<string, string>, origin = issuer) => fetch(baseUrl + endpoint, {
+    method: "POST",
+    headers: { origin },
+    redirect: "manual",
+    body: new URLSearchParams(fields)
+  });
+
+  const redirectUri = "https://chatgpt.com/connector_platform_oauth_redirect";
+  const registration = {
+    redirect_uris: [redirectUri, "https://chatgpt.com/connector/oauth/test-callback_id"],
+    grant_types: ["authorization_code", "refresh_token"],
+    token_endpoint_auth_method: "none"
+  };
+  const badRegistration = await postJson("/oauth/register", { redirect_uris: [redirectUri + "?extra=1"] });
+  assert.equal(badRegistration.status, 400);
+  assert.equal((await badRegistration.json()).error, "invalid_redirect_uri");
+  const registered = await postJson("/oauth/register", registration);
+  assert.equal(registered.status, 201);
+  const client = await registered.json();
+  assert.equal(typeof client.client_id, "string");
+  assert.deepEqual(client.redirect_uris, registration.redirect_uris);
+
+  const verifier = "a".repeat(43);
+  const authorization = {
+    client_id: client.client_id as string,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    code_challenge_method: "S256",
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+    state: 'example "<state>"',
+    resource,
+    scope: "mcp"
+  };
+  const authorize = (params: Record<string, string>) => fetch(
+    baseUrl + "/oauth/authorize?" + new URLSearchParams(params), { redirect: "manual" }
+  );
+  const deniedRedirect = await authorize({ ...authorization, redirect_uri: "https://chatgpt.com/connector/oauth/unregistered" });
+  assert.equal(deniedRedirect.status, 400);
+  assert.equal(deniedRedirect.headers.get("location"), null);
+  const plain = await authorize({ ...authorization, code_challenge_method: "plain" });
+  assert.equal(plain.status, 303);
+  const plainCallback = new URL(plain.headers.get("location")!);
+  assert.equal(plainCallback.searchParams.get("error"), "invalid_request");
+  assert.equal(plainCallback.searchParams.get("iss"), issuer);
+  assert.equal(plainCallback.searchParams.has("code"), false);
+  const consent = await authorize(authorization);
+  assert.equal(consent.status, 200);
+  assert.equal(consent.headers.get("cache-control"), "no-store");
+  assert.match(await consent.text(), /example &quot;&lt;state&gt;&quot;/);
+  const wrongSecret = await postForm("/oauth/authorize", { ...authorization, owner_secret: "wrong" });
+  assert.equal(wrongSecret.status, 403);
+  const approval = { ...authorization, owner_secret: process.env.OAUTH_OWNER_SECRET! };
+  assert.equal((await postForm("/oauth/authorize", approval, "https://other.example")).status, 403);
+  const approved = await postForm("/oauth/authorize", approval);
+  assert.equal(approved.status, 303);
+  const callback = new URL(approved.headers.get("location")!);
+  assert.equal(callback.origin + callback.pathname, redirectUri);
+  assert.equal(callback.searchParams.get("state"), authorization.state);
+  assert.equal(callback.searchParams.get("iss"), issuer);
+  const code = callback.searchParams.get("code");
+  assert.ok(code);
+
+  const exchange = {
+    grant_type: "authorization_code",
+    client_id: authorization.client_id,
+    code,
+    redirect_uri: redirectUri,
+    code_verifier: verifier,
+    resource
+  };
+  const approvedAgain = await postForm("/oauth/authorize", approval);
+  assert.equal(approvedAgain.status, 303);
+  const expiredCode = new URL(approvedAgain.headers.get("location")!).searchParams.get("code");
+  assert.ok(expiredCode);
+  const expiredCodeHash = createHash("sha256").update(expiredCode).digest("base64url");
+  const codeExpiry = await db.execute({
+    sql: "SELECT expires_at FROM oauth_grants WHERE code_hash = ?",
+    args: [expiredCodeHash]
+  });
+  const remaining = Number(codeExpiry.rows[0]?.expires_at) - Math.floor(Date.now() / 1000);
+  assert.ok(remaining > 0 && remaining <= 600);
+  await db.execute({ sql: "UPDATE oauth_grants SET expires_at = 0 WHERE code_hash = ?", args: [expiredCodeHash] });
+  const expiredExchange = await postForm("/oauth/token", { ...exchange, code: expiredCode });
+  assert.equal(expiredExchange.status, 400);
+  assert.equal((await expiredExchange.json()).error, "invalid_grant");
+
+  const wrongVerifier = await postForm("/oauth/token", { ...exchange, code_verifier: "b".repeat(43) });
+  assert.equal(wrongVerifier.status, 400);
+  assert.equal((await wrongVerifier.json()).error, "invalid_grant");
+  const wrongTarget = await postForm("/oauth/token", { ...exchange, resource: issuer });
+  assert.equal(wrongTarget.status, 400);
+  assert.equal((await wrongTarget.json()).error, "invalid_target");
+  const exchanges = await Promise.all([postForm("/oauth/token", exchange), postForm("/oauth/token", exchange)]);
+  const accepted = exchanges.find((response) => response.ok);
+  const replay = exchanges.find((response) => !response.ok);
+  assert.equal(accepted?.status, 200);
+  assert.equal(accepted.headers.get("cache-control"), "no-store");
+  assert.equal(replay?.status, 400);
+  assert.equal((await replay.json()).error, "invalid_grant");
+  const tokens = await accepted.json();
+  assert.equal(tokens.token_type, "Bearer");
+  assert.equal(tokens.expires_in, 3600);
+
+  const initialize = {
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "oauth-test", version: "1" } }
+  };
+  const assertChallenge = async (token?: string) => {
+    const unauthorized = await postJson("/mcp", initialize, token);
+    assert.equal(unauthorized.status, 401);
+    assert.match(unauthorized.headers.get("www-authenticate") ?? "", /^Bearer /);
+    assert.ok(unauthorized.headers.get("www-authenticate")?.includes(`resource_metadata="${issuer}${metadataPath}/mcp"`));
+  };
+  await assertChallenge();
+  await assertChallenge("x".repeat(43));
+
+  const initialized = await postJson("/mcp", initialize, tokens.access_token);
+  assert.equal(initialized.status, 200);
+  assert.equal((await initialized.json()).result.serverInfo.name, "discord-notify-bot");
+  const sent = await postJson("/mcp", {
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "send_notification", arguments: { title: "OAuth integration test" } }
+  }, tokens.access_token);
+  assert.equal(sent.status, 200);
+  const tool = (await sent.json()).result;
+  assert.notEqual(tool.isError, true);
+  const notification = JSON.parse(tool.content[0].text);
+  assert.equal(notification.accepted, true);
+  assert.equal(notification.agent, "chatgpt");
+  assert.equal(notification.threadName, "chatgpt");
+  assert.equal((await postJson("/api/v1/notifications", { title: "OAuth REST" }, tokens.access_token)).status, 401);
+  const legacy = await postJson("/api/v1/notifications", { title: "Legacy REST", status: "info" }, "tok_oauth_regression");
+  assert.equal(legacy.status, 202);
+  assert.equal((await legacy.json()).agent, "codex");
+
+  await db.execute({ sql: "UPDATE oauth_grants SET resource = ? WHERE client_id = ?", args: [issuer, client.client_id] });
+  await assertChallenge(tokens.access_token);
+  await db.execute({
+    sql: "UPDATE oauth_grants SET resource = ?, access_expires_at = 0 WHERE client_id = ?",
+    args: [resource, client.client_id]
+  });
+  await assertChallenge(tokens.access_token);
+
+  const refresh = { grant_type: "refresh_token", client_id: authorization.client_id, refresh_token: tokens.refresh_token, resource };
+  const refreshed = await postForm("/oauth/token", refresh);
+  assert.equal(refreshed.status, 200);
+  const rotated = await refreshed.json();
+  assert.notEqual(rotated.refresh_token, tokens.refresh_token);
+  assert.equal((await postForm("/oauth/token", refresh)).status, 400);
+  for (let count = 0; count < 3; count++) {
+    const response = await postJson("/mcp", initialize, rotated.access_token);
+    assert.equal(response.status, 200);
+    await response.json();
+  }
+  assert.equal((await postJson("/mcp", initialize, rotated.access_token)).status, 429);
+});

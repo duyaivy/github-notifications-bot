@@ -30,6 +30,7 @@ const envSchema = z.object({
   DISCORD_AGENT_CHANNEL_NAME: z.string().min(1).default("ai-notifications"),
   AGENT_API_TOKENS: optionalNonEmptyString,
   PUBLIC_BASE_URL: optionalHttpUrl,
+  OAUTH_OWNER_SECRET: optionalNonEmptyString,
   AGENT_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
   AGENT_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),

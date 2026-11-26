@@ -39,3 +39,5 @@ services:
         sync: false
       - key: PUBLIC_BASE_URL
         sync: false
+      - key: OAUTH_OWNER_SECRET
+        sync: false
