@@ -9,3 +9,9 @@ data/
 *.db-shm
 *.db-wal
 RENDER_DEPLOYMENT.md
+
+# Local browser artifacts and reference files
+/.playwright-mcp/
+/image.png
+/image copy.png
+/docs/AGENT_SETUP.md
