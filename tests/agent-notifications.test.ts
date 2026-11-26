@@ -8,6 +8,7 @@ import type { Server } from "node:http";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-bot-test-"));
 const tempDbPath = path.join(tempDir, "test.db");
+const ownerSecret = "test-only-owner-secret-for-oauth";
 
 // Set env vars before importing modules that validate process.env at load time
 process.env.NODE_ENV = "test";
@@ -24,7 +25,7 @@ process.env.DISCORD_AGENT_CHANNEL_ID = "";
 process.env.DISCORD_AGENT_CHANNEL_NAME = "ai-notifications";
 process.env.AGENT_API_TOKENS = "muse:tok_muse,tok_shared";
 process.env.PUBLIC_BASE_URL = "https://notify.example.test/";
-process.env.OAUTH_OWNER_SECRET = "test-only-owner-secret-for-oauth";
+process.env.OAUTH_OWNER_SECRET = ` \t${ownerSecret}\n`;
 process.env.LOG_LEVEL = "silent";
 
 const { createApp } = await import("../src/app.js");
@@ -34,6 +35,7 @@ const { AgentThreadRepository } = await import("../src/modules/agent-thread/agen
 const { AgentThreadService } = await import("../src/modules/agent-thread/agent-thread.service.js");
 const { normalizeAgentKey, normalizeAgentStatus } = await import("../src/modules/agent-notify/agent-notify.types.js");
 const { toSafeError } = await import("../src/common/errors.js");
+const { logger } = await import("../src/common/logger.js");
 const { StaticBearerTokenVerifier } = await import("../src/modules/auth/bearer-token.verifier.js");
 const { DiscordApiError } = await import("../src/modules/discord/discord.errors.js");
 const { DiscordService } = await import("../src/modules/discord/discord.service.js");
@@ -707,7 +709,9 @@ test("DiscordService surfaces Discord error code and message while toSafeError p
 
 
 
-test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and static REST compatibility", async () => {
+test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and static REST compatibility", async (t) => {
+  const warn = t.mock.method(logger, "warn", () => {});
+  const lastWarning = () => warn.mock.calls.at(-1)?.arguments[0];
   const issuer = "https://notify.example.test";
   const resource = issuer + "/mcp";
   const metadataPath = "/.well-known/oauth-protected-resource";
@@ -758,6 +762,11 @@ test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and s
   const badRegistration = await postJson("/oauth/register", { redirect_uris: [redirectUri + "?extra=1"] });
   assert.equal(badRegistration.status, 400);
   assert.equal((await badRegistration.json()).error, "invalid_redirect_uri");
+  assert.deepEqual(lastWarning(), { reason: "invalid_redirect_uri", field: ["redirect_uris", 0] });
+  const badMetadata = await postJson("/oauth/register", { ...registration, token_endpoint_auth_method: "client_secret_basic" });
+  assert.equal(badMetadata.status, 400);
+  assert.equal((await badMetadata.json()).error, "invalid_client_metadata");
+  assert.deepEqual(lastWarning(), { reason: "invalid_client_metadata", field: ["token_endpoint_auth_method"] });
   const registered = await postJson("/oauth/register", registration);
   assert.equal(registered.status, 201);
   const client = await registered.json();
@@ -781,22 +790,50 @@ test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and s
   const deniedRedirect = await authorize({ ...authorization, redirect_uri: "https://chatgpt.com/connector/oauth/unregistered" });
   assert.equal(deniedRedirect.status, 400);
   assert.equal(deniedRedirect.headers.get("location"), null);
+  assert.deepEqual(lastWarning(), { reason: "invalid_request", field: "client_id/redirect_uri" });
   const plain = await authorize({ ...authorization, code_challenge_method: "plain" });
   assert.equal(plain.status, 303);
   const plainCallback = new URL(plain.headers.get("location")!);
   assert.equal(plainCallback.searchParams.get("error"), "invalid_request");
   assert.equal(plainCallback.searchParams.get("iss"), issuer);
   assert.equal(plainCallback.searchParams.has("code"), false);
+  assert.deepEqual(lastWarning(), { reason: "invalid_request", field: "code_challenge_method" });
   const consent = await authorize(authorization);
   assert.equal(consent.status, 200);
   assert.equal(consent.headers.get("cache-control"), "no-store");
-  assert.match(await consent.text(), /example &quot;&lt;state&gt;&quot;/);
-  const wrongSecret = await postForm("/oauth/authorize", { ...authorization, owner_secret: "wrong" });
-  assert.equal(wrongSecret.status, 403);
-  const approval = { ...authorization, owner_secret: process.env.OAUTH_OWNER_SECRET! };
-  assert.equal((await postForm("/oauth/authorize", approval, "https://other.example")).status, 403);
+  assert.equal(consent.headers.get("referrer-policy"), "strict-origin");
+  const consentHtml = await consent.text();
+  assert.match(consentHtml, /example &quot;&lt;state&gt;&quot;/);
+  const styles = consentHtml.match(/<style>([\s\S]+?)<\/style>/)?.[1];
+  assert.ok(styles);
+  const styleHash = createHash("sha256").update(styles).digest("base64");
+  assert.ok(consent.headers.get("content-security-policy")?.includes(`style-src 'sha256-${styleHash}'`));
+  const assertApprovalWarning = (response: Response, reason: string, origin: string, secretLength: number) => {
+    assert.deepEqual(lastWarning(), {
+      requestId: response.headers.get("x-request-id"),
+      reason,
+      origin,
+      issuer,
+      secretLength
+    });
+  };
+  const approval = { ...authorization, owner_secret: ownerSecret };
+  const deniedApprovals: { fields: Record<string, string>; origin: string; reason: string }[] = [
+    { fields: { ...authorization, owner_secret: " \twrong-secret\n" }, origin: issuer, reason: "secret_mismatch" },
+    { fields: approval, origin: "https://other.example", reason: "origin_mismatch" },
+    { fields: approval, origin: "null", reason: "origin_mismatch" },
+    { fields: authorization, origin: issuer, reason: "secret_missing" },
+    { fields: { ...authorization, owner_secret: " \t\n" }, origin: issuer, reason: "secret_missing" }
+  ];
+  for (const { fields, origin, reason } of deniedApprovals) {
+    const denied = await postForm("/oauth/authorize", fields, origin);
+    assert.equal(denied.status, 403);
+    assert.equal(await denied.text(), "Approval denied. Return to ChatGPT to try again.");
+    assertApprovalWarning(denied, reason, origin, fields.owner_secret?.length ?? 0);
+  }
   const approved = await postForm("/oauth/authorize", approval);
   assert.equal(approved.status, 303);
+  assertApprovalWarning(approved, "approved", issuer, ownerSecret.length);
   const callback = new URL(approved.headers.get("location")!);
   assert.equal(callback.origin + callback.pathname, redirectUri);
   assert.equal(callback.searchParams.get("state"), authorization.state);
@@ -812,8 +849,10 @@ test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and s
     code_verifier: verifier,
     resource
   };
-  const approvedAgain = await postForm("/oauth/authorize", approval);
+  const paddedSecret = ` \t${ownerSecret}\n `;
+  const approvedAgain = await postForm("/oauth/authorize", { ...approval, owner_secret: paddedSecret });
   assert.equal(approvedAgain.status, 303);
+  assertApprovalWarning(approvedAgain, "approved", issuer, paddedSecret.length);
   const expiredCode = new URL(approvedAgain.headers.get("location")!).searchParams.get("code");
   assert.ok(expiredCode);
   const expiredCodeHash = createHash("sha256").update(expiredCode).digest("base64url");
@@ -827,6 +866,7 @@ test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and s
   const expiredExchange = await postForm("/oauth/token", { ...exchange, code: expiredCode });
   assert.equal(expiredExchange.status, 400);
   assert.equal((await expiredExchange.json()).error, "invalid_grant");
+  assert.deepEqual(lastWarning(), { reason: "invalid_grant", field: "grant", grant_type: "authorization_code" });
 
   const wrongVerifier = await postForm("/oauth/token", { ...exchange, code_verifier: "b".repeat(43) });
   assert.equal(wrongVerifier.status, 400);
@@ -834,6 +874,11 @@ test("ChatGPT OAuth discovery, PKCE, MCP default agent, refresh, audience, and s
   const wrongTarget = await postForm("/oauth/token", { ...exchange, resource: issuer });
   assert.equal(wrongTarget.status, 400);
   assert.equal((await wrongTarget.json()).error, "invalid_target");
+  assert.deepEqual(lastWarning(), { reason: "invalid_target", field: "resource", grant_type: "authorization_code" });
+  const invalidClient = await postForm("/oauth/token", { ...exchange, client_secret: ownerSecret });
+  assert.equal(invalidClient.status, 400);
+  assert.equal((await invalidClient.json()).error, "invalid_client");
+  assert.deepEqual(lastWarning(), { reason: "invalid_client", field: "client_secret", grant_type: "authorization_code" });
   const exchanges = await Promise.all([postForm("/oauth/token", exchange), postForm("/oauth/token", exchange)]);
   const accepted = exchanges.find((response) => response.ok);
   const replay = exchanges.find((response) => !response.ok);
